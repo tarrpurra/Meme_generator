@@ -18,4 +18,5 @@ torch
 torchvision 
 diffusers 
 transformers 
-accelerate 
+accelerate
+replicate 
