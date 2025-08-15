@@ -1,0 +1,21 @@
+fastapi[standard]
+pydantic
+python-dotenv
+uvicorn
+pandas
+numpy
+google-genai==1.26.0
+uvicorn
+Pillow
+# Optional/future packages
+chromadb
+langchain
+requests
+beautifulsoup4
+loguru
+httpx
+torch 
+torchvision 
+diffusers 
+transformers 
+accelerate 
