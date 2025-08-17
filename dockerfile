@@ -20,6 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all files (main.py, generator scripts, etc.)
 COPY . .
 
+RUN mkdir -p /app/generated_images
+
 # Expose FastAPI port
 EXPOSE 8000
 

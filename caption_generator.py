@@ -32,9 +32,10 @@ def generate_caption(prompt: str):
             The meme should contain only the top and bottom captions, and optionally a middle caption if relevant.
             If the user provides an inappropriate or bad prompt, return an error message.
             Use a relatable tone and humor that will appeal to tech-savvy Gen Z users.
+            Please Provide a detail description of the image for the meme_concept.
             
             Output format should be valid JSON with these keys:
-            - "meme_concept": Brief description of the image that would fit the captions
+            - "meme_concept": Detail description of the image that would fit the captions
             - "top_caption": The top text for the meme
             - "middle_caption": Optional middle text (use null if not needed)
             - "bottom_caption": The bottom text for the meme

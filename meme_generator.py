@@ -9,6 +9,7 @@ from caption_generator import generate_caption
 from dotenv import load_dotenv
 import os
 import logging
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,9 @@ def generate_meme_image(user_prompt: str):
         str: Path to generated image file, or None if failed
     """
     print(f"🎯 Processing user prompt: {user_prompt}")
+    
+    # Ensure the generated_images directory exists
+    os.makedirs('generated_images', exist_ok=True)
     
     # Step 1: Generate caption using the caption generator
     print("📝 Generating meme caption...")
@@ -104,8 +108,8 @@ def create_image_prompt(caption_data):
 
 def image_generation(prompt: str):
     """
-    Generate a meme image using Replicate Imagen-4 as primary method,
-    with Gemini as backup if Replicate fails.
+    Generate a meme image using Gemini as primary method,
+    with Replicate Imagen-4 as backup if Gemini fails.
     
     Args:
         prompt (str): The image generation prompt
@@ -115,17 +119,18 @@ def image_generation(prompt: str):
     """
     print("🖼️ Starting image generation...")
     
-    # Try Replicate first
+    # Try Gemini first (as primary)
     image_path = generate_with_gemini(prompt)
     
     if image_path:
-        print("✅ Image generated successfully with Replicate Imagen-4")
+        print("✅ Image generated successfully with Gemini")
         return image_path
     else:
-        print("⚠️ Replicate failed, trying Gemini as backup...")
+        print("⚠️ Gemini failed, trying Replicate Imagen-4 as backup...")
         image_path = generate_with_replicate(prompt)
         if image_path:
-            print("✅ Image generated successfully with Gemini backup")
+            print("✅ Image generated successfully with Replicate Imagen-4 backup")
+            print(image_path)
             return image_path
         else:
             print("❌ Both image generation methods failed")
@@ -196,17 +201,21 @@ def generate_with_replicate(prompt):
                 response = requests.get(image_url, timeout=30)
                 response.raise_for_status()
                 
-                # Save the image with timestamp to avoid conflicts
-                import time
+                # FIXED: Save to generated_images directory
                 timestamp = int(time.time())
-                image_path = f'replicate-generated-image-{timestamp}.png'
+                image_path = f'generated_images/replicate-generated-image-{timestamp}.png'
                 
                 with open(image_path, 'wb') as f:
                     f.write(response.content)
                 
-                # Display the image
-                image = Image.open(image_path)
-                image.show()
+                print(f"💾 Image saved to: {image_path}")
+                
+                # Display the image (optional - you might want to comment this out for production)
+                try:
+                    image = Image.open(image_path)
+                    # image.show()  # Commented out for server environment
+                except Exception as e:
+                    logger.warning(f"Could not display image: {e}")
                 
                 return image_path
                 
@@ -225,7 +234,7 @@ def generate_with_replicate(prompt):
 
 def generate_with_gemini(prompt):
     """
-    Generate image using Gemini as backup
+    Generate image using Gemini
     
     Args:
         prompt (str): Image generation prompt
@@ -241,7 +250,7 @@ def generate_with_gemini(prompt):
         
         client = genai.Client(api_key=gemini_api_key)
         
-        print("🔄 Generating image with Gemini backup...")
+        print("🔄 Generating image with Gemini...")
         response = client.models.generate_content(
             model="gemini-2.0-flash-preview-image-generation",
             contents=prompt,
@@ -255,13 +264,21 @@ def generate_with_gemini(prompt):
                 print("Gemini response:", part.text)
             elif part.inline_data is not None:
                 # Save the image with timestamp to avoid conflicts
-                import time
                 timestamp = int(time.time())
-                image_path = f'gemini-generated-image-{timestamp}.png'
+                image_path = f'generated_images/gemini-generated-image-{timestamp}.png'
                 
                 image = Image.open(BytesIO(part.inline_data.data))
                 image.save(image_path)
-                image.show()
+                
+                print(f"💾 Image saved to: {image_path}")
+                
+                # Display the image (optional - you might want to comment this out for production)
+                try:
+                    # image.show()  # Commented out for server environment
+                    pass
+                except Exception as e:
+                    logger.warning(f"Could not display image: {e}")
+                
                 return image_path
         
         logger.error("No image data received from Gemini")
@@ -271,13 +288,3 @@ def generate_with_gemini(prompt):
         logger.error(f"Gemini image generation failed: {str(e)}")
         return None
 
-# # Main function for testing
-# if __name__ == "__main__":
-#     # Test the complete workflow
-#     test_prompt = "Create a meme where a cat is sleeping in a weird position and show me at the doctor for my back meanwhile how I sleep"
-#     result = generate_meme_image(test_prompt)
-    
-#     if result:
-#         print(f"🎉 Meme generated successfully! Saved as: {result}")
-#     else:
-#         print("😞 Failed to generate meme")

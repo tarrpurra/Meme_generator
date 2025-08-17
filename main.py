@@ -1,17 +1,18 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Request
-from fastapi.responses import Response, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from meme_generator import generate_meme_image
-from caption_generator import generate_caption
 import logging
 import os
-import base64
+from fastapi.staticfiles import StaticFiles
 import time
 import asyncio
-from pathlib import Path
-from PIL import Image
-import io
+from dotenv import load_dotenv
+import threading
+from datetime import datetime, timedelta
+
+load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +27,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
+app.mount("/images", StaticFiles(directory="generated_images"), name="images")
+
 # CORS for ICP canisters - configure your actual canister URLs
 app.add_middleware(
     CORSMiddleware,
@@ -35,7 +38,7 @@ app.add_middleware(
         "https://*.icp0.io",  # Alternative ICP domain
     ],
     allow_credentials=False,  # ICP outcalls don't support credentials
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -43,69 +46,126 @@ app.add_middleware(
 ICP_MAX_RESPONSE_SIZE = 1.8 * 1024 * 1024  # 1.8MB (leave buffer for headers)
 ICP_TIMEOUT = 25  # 25 seconds (leave buffer for 30s ICP timeout)
 
-def image_to_base64(image_path: str, max_size_mb: float = 1.5) -> Optional[str]:
-    """
-    Convert image to base64 string with size optimization for ICP.
-    
-    Args:
-        image_path: Path to the image file
-        max_size_mb: Maximum size in MB for the base64 string
-        
-    Returns:
-        Base64 encoded image string or None if too large
-    """
+# Base URL configuration - you can set this via environment variable
+BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
+
+# Auto-cleanup configuration
+AUTO_CLEANUP_ENABLED = os.getenv("AUTO_CLEANUP_ENABLED", "true").lower() == "true"
+CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
+CLEANUP_OLDER_THAN_HOURS = int(os.getenv("CLEANUP_OLDER_THAN_HOURS", "48"))
+
+# Global variable to track cleanup task
+cleanup_task = None
+last_cleanup_time = None
+
+def cleanup_old_images_sync(older_than_hours: int = CLEANUP_OLDER_THAN_HOURS) -> Dict[str, Any]:
+    """Synchronous version of cleanup for background task."""
     try:
-        if not os.path.exists(image_path):
-            logger.error(f"Image file not found: {image_path}")
-            return None
+        if not os.path.exists("generated_images"):
+            logger.info("No generated_images directory found for cleanup")
+            return {"message": "No generated_images directory found"}
+       
+        current_time = time.time()
+        cutoff_time = current_time - (older_than_hours * 3600)  # Convert hours to seconds
+       
+        deleted_files = []
+        total_files = 0
+        total_size_deleted = 0
         
-        # Open and potentially compress image
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary
-            if img.mode in ('RGBA', 'LA', 'P'):
-                img = img.convert('RGB')
-            
-            # Start with original size
-            quality = 85
-            width, height = img.size
-            
-            while True:
-                # Create a copy for this iteration
-                temp_img = img.copy()
-                
-                # Resize if too large
-                if width > 1024 or height > 1024:
-                    temp_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-                
-                # Convert to bytes
-                img_bytes = io.BytesIO()
-                temp_img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
-                img_bytes.seek(0)
-                
-                # Check size
-                size_mb = len(img_bytes.getvalue()) / (1024 * 1024)
-                
-                if size_mb <= max_size_mb or quality <= 20:
-                    # Encode to base64
-                    b64_string = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
-                    logger.info(f"Image converted to base64: {size_mb:.2f}MB, quality: {quality}")
-                    return b64_string
-                
-                # Reduce quality for next iteration
-                quality -= 15
-                if quality <= 20:
-                    # Try reducing dimensions
-                    width = int(width * 0.8)
-                    height = int(height * 0.8)
-                    quality = 85
-                    
-                    if width < 256 or height < 256:
-                        logger.error("Cannot compress image small enough for ICP")
-                        return None
+        for filename in os.listdir("generated_images"):
+            file_path = os.path.join("generated_images", filename)
+            if os.path.isfile(file_path):
+                total_files += 1
+                file_time = os.path.getctime(file_path)
+                if file_time < cutoff_time:
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        os.remove(file_path)
+                        deleted_files.append(filename)
+                        total_size_deleted += file_size
+                        logger.info(f"Auto-cleanup: Deleted old file: {filename}")
+                    except Exception as e:
+                        logger.error(f"Auto-cleanup: Failed to delete {filename}: {str(e)}")
         
+        result = {
+            "success": True,
+            "message": f"Auto-cleanup completed",
+            "deleted_files": deleted_files,
+            "deleted_count": len(deleted_files),
+            "total_files_checked": total_files,
+            "total_size_deleted_bytes": total_size_deleted,
+            "cutoff_hours": older_than_hours,
+            "timestamp": int(current_time)
+        }
+        
+        if deleted_files:
+            logger.info(f"Auto-cleanup: Deleted {len(deleted_files)} files, freed {total_size_deleted} bytes")
+        else:
+            logger.info(f"Auto-cleanup: No files older than {older_than_hours} hours found")
+            
+        return result
+    
     except Exception as e:
-        logger.error(f"Error converting image to base64: {e}")
-        return None
+        logger.error(f"Auto-cleanup failed: {str(e)}")
+        return {"success": False, "error": str(e), "timestamp": int(time.time())}
+
+async def periodic_cleanup():
+    """Background task that runs cleanup every CLEANUP_INTERVAL_HOURS hours."""
+    global last_cleanup_time
+    
+    logger.info(f"Starting periodic cleanup task (every {CLEANUP_INTERVAL_HOURS} hours)")
+    
+    while True:
+        try:
+            # Wait for the specified interval
+            await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)  # Convert hours to seconds
+            
+            logger.info("Running scheduled cleanup...")
+            result = cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
+            last_cleanup_time = datetime.now()
+            
+            if result.get("success"):
+                logger.info(f"Scheduled cleanup completed: {result.get('deleted_count', 0)} files deleted")
+            else:
+                logger.error(f"Scheduled cleanup failed: {result.get('error')}")
+                
+        except Exception as e:
+            logger.error(f"Error in periodic cleanup task: {str(e)}")
+            # Continue the loop even if there's an error
+            await asyncio.sleep(60)  # Wait 1 minute before retrying
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks when the app starts."""
+    global cleanup_task, last_cleanup_time
+    
+    if AUTO_CLEANUP_ENABLED:
+        logger.info("Starting automatic cleanup background task...")
+        cleanup_task = asyncio.create_task(periodic_cleanup())
+        last_cleanup_time = datetime.now()
+        
+        # Run initial cleanup after 5 minutes to clean up any existing old files
+        async def initial_cleanup():
+            await asyncio.sleep(300)  # Wait 5 minutes
+            logger.info("Running initial cleanup...")
+            cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
+            
+        asyncio.create_task(initial_cleanup())
+    else:
+        logger.info("Automatic cleanup is disabled")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up background tasks when the app shuts down."""
+    global cleanup_task
+    
+    if cleanup_task:
+        logger.info("Shutting down cleanup background task...")
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            logger.info("Cleanup task cancelled successfully")
 
 @app.get("/health")
 def health_check():
@@ -114,20 +174,26 @@ def health_check():
         "status": "healthy", 
         "service": "icp-meme-generator",
         "timestamp": int(time.time()),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "auto_cleanup": {
+            "enabled": AUTO_CLEANUP_ENABLED,
+            "interval_hours": CLEANUP_INTERVAL_HOURS,
+            "cleanup_older_than_hours": CLEANUP_OLDER_THAN_HOURS,
+            "last_cleanup": last_cleanup_time.isoformat() if last_cleanup_time else None
+        }
     }
 
 @app.get("/generate_meme")
 async def generate_meme_for_icp(prompt: str) -> Dict[str, Any]:
     """
     Generate a meme optimized for ICP HTTPS outcalls.
-    Returns image as base64 to avoid file serving issues.
+    Returns image URL (caption generation is handled internally by meme_generator).
     
     Args:
         prompt: The meme generation prompt
         
     Returns:
-        Dict containing success status, image data, and metadata
+        Dict containing success status, image URL, and metadata
     """
     start_time = time.time()
     
@@ -139,47 +205,35 @@ async def generate_meme_for_icp(prompt: str) -> Dict[str, Any]:
         if len(prompt) > 500:  # Reasonable limit
             raise HTTPException(status_code=400, detail="Prompt too long (max 500 chars)")
         
-        logger.info(f"ICP Meme Generation Request - Prompt: {prompt[:100]}...")
+        logger.info(f"Meme Generation Request - Prompt: {prompt[:100]}...")
         
-        # Set timeout for image generation
+        # Generate image with timeout (caption generation happens inside generate_meme_image)
         try:
             image_path = await asyncio.wait_for(
                 asyncio.to_thread(generate_meme_image, prompt.strip()),
                 timeout=ICP_TIMEOUT
             )
+            logger.info(f"Generated image path: {image_path}")
         except asyncio.TimeoutError:
             raise HTTPException(status_code=408, detail="Image generation timeout")
+        except Exception as e:
+            logger.error(f"Error during image generation: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Image generation failed: {str(e)}")
         
         if not image_path:
             raise HTTPException(status_code=500, detail="Failed to generate image")
         
-        # Convert image to base64 for ICP response
-        image_base64 = image_to_base64(image_path)
+        # Check if file actually exists
+        if not os.path.exists(image_path):
+            logger.error(f"Generated image file not found at: {image_path}")
+            raise HTTPException(status_code=500, detail="Generated image file not found")
         
-        if not image_base64:
-            raise HTTPException(status_code=500, detail="Failed to process generated image for ICP")
+        # Get file size for metadata
+        file_size = os.path.getsize(image_path)
         
-        # Get caption data (this should be fast)
-        try:
-            caption_data = await asyncio.wait_for(
-                asyncio.to_thread(generate_caption, prompt),
-                timeout=5  # Quick timeout for caption
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Caption generation timeout, using fallback")
-            caption_data = {
-                "meme_concept": "Generated meme",
-                "top_caption": "Generated meme",
-                "bottom_caption": "From AI",
-                "middle_caption": None,
-                "error": None
-            }
-        
-        # Clean up the generated file
-        try:
-            os.remove(image_path)
-        except Exception as e:
-            logger.warning(f"Failed to clean up image file: {e}")
+        # Create image URL (don't delete the file since we're serving it)
+        image_filename = os.path.basename(image_path)
+        image_url = f"{BASE_URL}/images/{image_filename}"
         
         processing_time = time.time() - start_time
         
@@ -188,12 +242,13 @@ async def generate_meme_for_icp(prompt: str) -> Dict[str, Any]:
             "message": "Meme generated successfully",
             "data": {
                 "prompt": prompt,
-                "image_base64": image_base64,
-                "image_format": "jpeg",
-                "caption_data": caption_data,
+                "image_url": image_url,
+                "image_filename": image_filename,
+                "image_format": "png",
                 "metadata": {
                     "processing_time": round(processing_time, 2),
                     "timestamp": int(time.time()),
+                    "file_size_bytes": file_size,
                     "service": "icp-meme-generator"
                 }
             }
@@ -203,9 +258,10 @@ async def generate_meme_for_icp(prompt: str) -> Dict[str, Any]:
         response_size = len(str(response_data))
         if response_size > ICP_MAX_RESPONSE_SIZE:
             logger.error(f"Response too large for ICP: {response_size} bytes")
-            raise HTTPException(status_code=413, detail="Generated image too large for ICP transport")
+            raise HTTPException(status_code=413, detail="Response too large for ICP transport")
         
         logger.info(f"Meme generated successfully in {processing_time:.2f}s, response size: {response_size} bytes")
+        logger.info(f"Image available at: {image_url}")
         
         return response_data
         
@@ -238,80 +294,126 @@ async def generate_meme_post_for_icp(request: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"POST meme generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/generate_caption_only")
-async def generate_caption_only(prompt: str) -> Dict[str, Any]:
-    """
-    Generate only captions without image for faster responses.
-    Useful for ICP canisters that want to handle image generation separately.
-    
-    Args:
-        prompt: The meme generation prompt
-        
-    Returns:
-        Dict containing caption data
-    """
+@app.get("/list_generated_images")
+async def list_generated_images():
+    """List all generated images for debugging purposes."""
     try:
-        if not prompt or len(prompt.strip()) == 0:
-            raise HTTPException(status_code=400, detail="Prompt is required")
+        if not os.path.exists("generated_images"):
+            return {"images": [], "message": "No generated_images directory found"}
         
-        logger.info(f"Caption-only generation for: {prompt[:100]}...")
-        
-        # Quick caption generation
-        caption_data = await asyncio.wait_for(
-            asyncio.to_thread(generate_caption, prompt.strip()),
-            timeout=10
-        )
+        files = []
+        total_size = 0
+        for filename in os.listdir("generated_images"):
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                file_path = os.path.join("generated_images", filename)
+                file_stats = os.stat(file_path)
+                file_size = file_stats.st_size
+                total_size += file_size
+                files.append({
+                    "filename": filename,
+                    "url": f"{BASE_URL}/images/{filename}",
+                    "size_bytes": file_size,
+                    "created_time": int(file_stats.st_ctime),
+                    "age_hours": round((time.time() - file_stats.st_ctime) / 3600, 1)
+                })
         
         return {
             "success": True,
-            "message": "Caption generated successfully",
-            "data": {
-                "prompt": prompt,
-                "caption_data": caption_data,
-                "timestamp": int(time.time())
-            }
+            "images": sorted(files, key=lambda x: x["created_time"], reverse=True),
+            "total_count": len(files),
+            "total_size_bytes": total_size,
+            "total_size_mb": round(total_size / (1024 * 1024), 2)
         }
-        
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="Caption generation timeout")
+    
     except Exception as e:
-        logger.error(f"Caption generation failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to list images: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@app.delete("/cleanup_old_images")
+async def cleanup_old_images_manual(older_than_hours: int = 24):
+    """Manual cleanup endpoint - Clean up old generated images to save disk space."""
+    result = cleanup_old_images_sync(older_than_hours)
+    return result
+
+@app.get("/cleanup_status")
+async def cleanup_status():
+    """Get information about the automatic cleanup system."""
+    return {
+        "auto_cleanup_enabled": AUTO_CLEANUP_ENABLED,
+        "cleanup_interval_hours": CLEANUP_INTERVAL_HOURS,
+        "cleanup_older_than_hours": CLEANUP_OLDER_THAN_HOURS,
+        "last_cleanup_time": last_cleanup_time.isoformat() if last_cleanup_time else None,
+        "next_cleanup_approximate": (last_cleanup_time + timedelta(hours=CLEANUP_INTERVAL_HOURS)).isoformat() if last_cleanup_time else "Unknown",
+        "cleanup_task_running": cleanup_task is not None and not cleanup_task.done()
+    }
+
+@app.post("/trigger_cleanup")
+async def trigger_cleanup_now():
+    """Manually trigger a cleanup operation immediately."""
+    logger.info("Manual cleanup triggered via API")
+    result = cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
+    return {
+        "message": "Manual cleanup completed",
+        "result": result
+    }
 
 @app.get("/")
 def root():
-    """Root endpoint with ICP integration information."""
+    """Root endpoint with service information."""
     return {
         "service": "Meme Generator Microservice",
         "version": "1.0.0",
-        "description": "FastAPI microservice designed for ICP canister integration",
+        "description": "FastAPI microservice for meme generation with integrated captions and auto-cleanup",
+        "base_url": BASE_URL,
         "endpoints": {
             "/generate_meme": {
                 "methods": ["GET", "POST"],
-                "description": "Generate meme with image as base64",
+                "description": "Generate meme with image URL (captions handled internally)",
                 "params": "prompt (string)",
-                "response": "base64 encoded image + metadata"
+                "response": "image URL + metadata"
             },
-            "/generate_caption_only": {
+            "/list_generated_images": {
                 "method": "GET",
-                "description": "Generate captions only (faster)",
-                "params": "prompt (string)",
-                "response": "caption data only"
+                "description": "List all generated images with file info"
+            },
+            "/cleanup_old_images": {
+                "method": "DELETE",
+                "description": "Manually clean up old generated images",
+                "params": "older_than_hours (int, optional, default: 24)"
+            },
+            "/cleanup_status": {
+                "method": "GET",
+                "description": "Get auto-cleanup system status"
+            },
+            "/trigger_cleanup": {
+                "method": "POST",
+                "description": "Manually trigger cleanup immediately"
             },
             "/health": {
                 "method": "GET", 
-                "description": "Health check endpoint"
+                "description": "Health check endpoint with cleanup info"
             }
         },
-        "icp_considerations": {
-            "max_response_size": f"{ICP_MAX_RESPONSE_SIZE/1024/1024:.1f}MB",
-            "timeout_limit": f"{ICP_TIMEOUT}s",
-            "image_format": "JPEG base64 encoded",
-            "cors_enabled": True
+        "features": {
+            "integrated_captions": "Caption generation handled in meme_generator.py",
+            "image_serving": "Static file serving via /images/ endpoint",
+            "automatic_cleanup": f"Auto-cleanup every {CLEANUP_INTERVAL_HOURS}h (files older than {CLEANUP_OLDER_THAN_HOURS}h)",
+            "manual_cleanup": "Manual cleanup endpoints available",
+            "icp_compatible": "Optimized for ICP HTTPS outcalls"
         },
-        "usage_example": {
-            "curl": "curl 'https://your-service.com/generate_meme?prompt=funny cat meme'",
-            "javascript": "fetch('https://your-service.com/generate_meme?prompt=funny cat meme')"
+        "auto_cleanup": {
+            "enabled": AUTO_CLEANUP_ENABLED,
+            "interval_hours": CLEANUP_INTERVAL_HOURS,
+            "cleanup_older_than_hours": CLEANUP_OLDER_THAN_HOURS,
+            "last_cleanup": last_cleanup_time.isoformat() if last_cleanup_time else None
+        },
+        "usage_examples": {
+            "curl_get": f"curl '{BASE_URL}/generate_meme?prompt=funny cat meme'",
+            "curl_post": f"curl -X POST '{BASE_URL}/generate_meme' -H 'Content-Type: application/json' -d '{{\"prompt\": \"funny cat meme\"}}'",
+            "list_images": f"curl '{BASE_URL}/list_generated_images'",
+            "manual_cleanup": f"curl -X DELETE '{BASE_URL}/cleanup_old_images?older_than_hours=48'",
+            "cleanup_status": f"curl '{BASE_URL}/cleanup_status'",
+            "trigger_cleanup": f"curl -X POST '{BASE_URL}/trigger_cleanup'"
         }
     }
 
