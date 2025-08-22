@@ -19,4 +19,4 @@ Pillow
 # diffusers 
 # transformers 
 # accelerate
-# replicate 
+replicate
