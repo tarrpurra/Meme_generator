@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Git & IDE
+.git
+.gitignore
+.vscode/
+.idea/
+
+# Project outputs
+generated_images/
+cache/
+build/
+dist/
+node_modules/
+.dfX/
+.DS_Store
+
+# Large assets you don't need at build time
+assets/
+media/

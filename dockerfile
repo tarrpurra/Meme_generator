@@ -1,29 +1,29 @@
-# Base image
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
-# Set working directory inside container
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/home/appuser/.local/bin:$PATH"
+
 WORKDIR /app
 
-# Install OS-level dependencies required by Pillow
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime libs for Pillow only (no dev toolchains)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libsm6 libxext6 libxrender1 \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install
+# Install deps first (better layer cache)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Force wheels if possible (avoids compiling)
+RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt || \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy all files (main.py, generator scripts, etc.)
+# Copy app (now that deps are cached)
 COPY . .
+RUN mkdir -p /app/generated_images /app/cache \
+ && useradd -m appuser && chown -R appuser /app
+USER appuser
 
-RUN mkdir -p /app/generated_images
-
-# Expose FastAPI port
 EXPOSE 8000
-
-# Start server with Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host","0.0.0.0","--port","8000","--workers","1"]
