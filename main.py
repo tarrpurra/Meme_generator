@@ -32,11 +32,7 @@ app.mount("/images", StaticFiles(directory="generated_images"), name="images")
 # CORS for ICP canisters - configure your actual canister URLs
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "*",  # For development - restrict in production
-        "https://*.ic0.app",  # ICP canisters
-        "https://*.icp0.io",  # Alternative ICP domain
-    ],
+    allow_origins=["*"],
     allow_credentials=False,  # ICP outcalls don't support credentials
     allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
     allow_headers=["*"],
