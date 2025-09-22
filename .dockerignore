@@ -1,27 +1,26 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.env
-.env.*
-
-# Git & IDE
+service_account.json
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
 .git
-.gitignore
-.vscode/
-.idea/
-
-# Project outputs
-generated_images/
-cache/
-build/
-dist/
-node_modules/
-.dfX/
-.DS_Store
-
-# Large assets you don't need at build time
-assets/
-media/
+.mypy_cache
+.pytest_cache
+.hypothesis
+.vscode
+.history
+Thumbs.db

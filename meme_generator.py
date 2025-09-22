@@ -10,6 +10,14 @@ from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 
+# Handle credentials
+credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+if credentials_json:
+    # Write the JSON to a file
+    with open("service_account.json", "w") as f:
+        f.write(credentials_json)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "service_account.json"
+
 # Get project and location from env
 PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION")
