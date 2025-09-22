@@ -17,6 +17,9 @@ if credentials_json:
     with open("service_account.json", "w") as f:
         f.write(credentials_json)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "service_account.json"
+    print("Credentials file written successfully")
+else:
+    print("GOOGLE_CREDENTIALS_JSON not set")
 
 # Get project and location from env
 PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
