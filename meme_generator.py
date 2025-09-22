@@ -69,9 +69,8 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
 
     # Define available models in order of preference
     available_models = [
-        "gemini-2.0-flash-preview-image-generation",
-        "imagen-3.0-generate-001",
-        "imagen-4.0-generate-001"
+        "imagen-4.0-generate-001",
+        "imagen-3.0-generate-001"
     ]
 
     # Get preferred model
@@ -88,24 +87,20 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
     last_exception = None
     for model_name in available_models:
         try:
-            if model_name == "gemini-2.0-flash-preview-image-generation":
-                image = client.models.generate_content(
-                    model="gemini-2.0-flash-preview-image-generation",
-                    contents=image_prompt,  # Use image_prompt instead of prompt
-                    config=types.GenerateContentConfig(
-                        response_modalities=['TEXT', 'IMAGE']
-                    )
-                )
-                # For gemini, extract image differently if needed
-                # Assuming it returns image in response
-                generated_image = image.candidates[0].content.parts[0].inline_data  # Adjust based on actual response
-            elif model_name in ["imagen-3.0-generate-001", "imagen-4.0-generate-001"]:
+            if model_name == "imagen-4.0-generate-001":
                 image = client.models.generate_images(
                     model=model_name,
                     prompt=image_prompt,
                     config=GenerateImagesConfig(
                         image_size="1K",
                     ),
+                )
+                generated_image = image.generated_images[0].image
+            elif model_name == "imagen-3.0-generate-001":
+                image = client.models.generate_images(
+                    model=model_name,
+                    prompt=image_prompt,
+                    config=GenerateImagesConfig(),
                 )
                 generated_image = image.generated_images[0].image
             else:
