@@ -1,79 +1,61 @@
-import base64
-import requests
-import io
 import os
+from pathlib import Path
+from google import genai
+from google.genai.types import GenerateImagesConfig
 from dotenv import load_dotenv
-from PIL import Image
-import uuid
+import time
+
 load_dotenv()
-# You can set this in .env or directly here
-HF_API_TOKEN = os.getenv("HF_API_TOKEN") 
-CONTROLNET_API_URL = "https://api-inference.huggingface.co/models/lllyasviel/control_v11p_sd15_canny"
 
-HEADERS = {
-    "Authorization": f"Bearer {HF_API_TOKEN}"
-}
+# Get project and location from env
+PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
+LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION")
 
-def transform_image_to_style_api(image_bytes: bytes, prompt: str) -> dict:
+if not PROJECT or not LOCATION:
+    raise ValueError("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION must be set in environment")
+
+client = genai.Client(
+    vertexai=True,
+    project=PROJECT,
+    location=LOCATION,
+)
+
+def generate_art_image(prompt: str, model: str = None) -> str:
     """
-    Uses Hugging Face API to transform an image using ControlNet.
+    Generate an art image using Google's Imagen API.
 
     Args:
-        image_bytes (bytes): Raw image content
-        prompt (str): Style prompt (e.g., "Ghibli style")
+        prompt (str): The prompt describing the art to generate
+        model (str, optional): The Imagen model to use
 
     Returns:
-        dict: { success, generated_image_path } or error
+        str: Path to the generated image file
     """
     try:
-        # Convert image to base64
-        base64_image = base64.b64encode(image_bytes).decode()
+        # Get model from parameter or env
+        model_name = model or os.getenv("IMAGEN_MODEL", "imagen-3.0-generate-001")
 
-        payload = {
-            "inputs": {
-                "image": base64_image,
-                "prompt": prompt,
-            },
-            "parameters": {
-                "num_inference_steps": 30,
-                "guidance_scale": 8.5,
-                "controlnet_conditioning_scale": 1.0
-            }
-        }
+        # Generate image
+        image = client.models.generate_images(
+            model=model_name,
+            prompt=prompt,
+            config=GenerateImagesConfig(
+                image_size="2K",
+            ),
+        )
 
-        response = requests.post(CONTROLNET_API_URL, headers=HEADERS, json=payload)
+        # Create unique filename
+        timestamp = int(time.time())
+        output_file = f"art-{timestamp}.png"
+        output_path = Path("generated_images") / output_file
+        output_path.parent.mkdir(exist_ok=True)
 
-        if not response.ok:
-            return {"error": f"API call failed: {response.status_code} {response.text}"}
+        # Save image
+        image.generated_images[0].image.save(str(output_path))
 
-        # Hugging Face might return image bytes or base64
-        content_type = response.headers.get("content-type", "")
-        if "application/json" in content_type:
-            result_json = response.json()
-            if "error" in result_json:
-                return {"error": result_json["error"]}
-            if "image" in result_json:
-                # decode base64
-                image_data = base64.b64decode(result_json["image"])
-            else:
-                return {"error": "Unexpected response structure"}
-        elif "image/" in content_type:
-            image_data = response.content
-        else:
-            return {"error": "Unknown response type from API"}
+        print(f"Created art image using {len(image.generated_images[0].image.image_bytes)} bytes")
 
-        # Save to disk
-        filename = f"generated_{uuid.uuid4().hex[:8]}.png"
-        output_path = os.path.join("generated_images", filename)
-
-        with open(output_path, "wb") as out_file:
-            out_file.write(image_data)
-
-        return {
-            "success": True,
-            "generated_image_path": output_path,
-            "prompt_used": prompt
-        }
+        return str(output_path)
 
     except Exception as e:
-        return {"error": f"Exception: {str(e)}"}
+        raise Exception(f"Failed to generate art image: {str(e)}")

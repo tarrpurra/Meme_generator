@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 import asyncio, os, time, json, hashlib, logging
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
 
 # --- External logic (must return a file path under generated_images/) ---
 from meme_generator import generate_meme_image  # your function
@@ -45,8 +46,28 @@ DEFAULT_ORIGINS = [
 ]
 ALLOW_ORIGINS = [o for o in os.getenv("ALLOW_ORIGINS", "").split(",") if o.strip()] or DEFAULT_ORIGINS
 
+# ---------------- Lifespan ----------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global cleanup_task, last_cleanup_time
+    if AUTO_CLEANUP_ENABLED:
+        cleanup_task = asyncio.create_task(periodic_cleanup())
+        last_cleanup_time = datetime.now()
+        # delayed initial cleanup
+        async def initial_cleanup():
+            await asyncio.sleep(300)
+            cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
+        asyncio.create_task(initial_cleanup())
+    yield
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
 # ---------------- App ----------------
-app = FastAPI(title=APP_TITLE, version="1.2.0", docs_url="/docs", redoc_url="/redoc")
+app = FastAPI(title=APP_TITLE, version="1.2.0", docs_url="/docs", redoc_url="/redoc", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,8 +92,11 @@ async def add_cache_headers(request: Request, call_next):
 _locks: Dict[str, asyncio.Lock] = {}
 _mem_index: Dict[str, dict] = {}  # tiny in-memory index of recent cache lookups
 
-def _key(prompt: str) -> str:
-    return hashlib.md5(prompt.strip().lower().encode()).hexdigest()
+def _key(prompt: str, model: str = None) -> str:
+    key_str = prompt.strip().lower()
+    if model:
+        key_str += f"|{model}"
+    return hashlib.md5(key_str.encode()).hexdigest()
 
 def _meta_path(key: str) -> Path:
     return CACHE_DIR / f"{key}.json"
@@ -159,28 +183,6 @@ async def periodic_cleanup():
         else:
             logger.error(f"Cleanup failed: {result.get('error')}")
 
-@app.on_event("startup")
-async def on_startup():
-    global cleanup_task, last_cleanup_time
-    if AUTO_CLEANUP_ENABLED:
-        cleanup_task = asyncio.create_task(periodic_cleanup())
-        last_cleanup_time = datetime.now()
-        # delayed initial cleanup
-        async def initial_cleanup():
-            await asyncio.sleep(300)
-            cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
-        asyncio.create_task(initial_cleanup())
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    global cleanup_task
-    if cleanup_task:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
-
 # ---------------- Routes ----------------
 @app.get("/health")
 def health():
@@ -218,12 +220,12 @@ def index():
     }
 
 @app.get("/generate_meme")
-async def generate_meme_get(prompt: str) -> Dict[str, Any]:
+async def generate_meme_get(prompt: str, model: str = None) -> Dict[str, Any]:
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
 
-    k = _key(prompt)
+    k = _key(prompt, model)
     # 1) cache
     meta = _read_meta(k)
     if meta:
@@ -264,7 +266,7 @@ async def generate_meme_get(prompt: str) -> Dict[str, Any]:
         start = time.time()
         try:
             image_path = await asyncio.wait_for(
-                asyncio.to_thread(generate_meme_image, prompt),
+                asyncio.to_thread(generate_meme_image, prompt, model),
                 timeout=ICP_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -291,6 +293,7 @@ async def generate_meme_get(prompt: str) -> Dict[str, Any]:
                 "metadata": {
                     "processing_time": processing_time,
                     "file_size_bytes": os.path.getsize(image_path),
+                    "file_size_mb": round(os.path.getsize(image_path) / (1024 * 1024), 2),
                     "service": "icp-meme-generator",
                 },
             },
@@ -307,7 +310,8 @@ async def generate_meme_post(body: Dict[str, Any]) -> Dict[str, Any]:
     prompt = (body.get("prompt") or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
-    return await generate_meme_get(prompt)
+    model = body.get("model")
+    return await generate_meme_get(prompt, model)
 
 @app.get("/list_generated_images")
 async def list_generated_images():

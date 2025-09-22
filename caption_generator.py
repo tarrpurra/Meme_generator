@@ -1,16 +1,22 @@
+import os
 from google import genai
 from google.genai import types
 import json
 import re
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
-gemini_api_key = os.getenv('GEMINI_API')
+project = os.getenv('GOOGLE_CLOUD_PROJECT')
+location = os.getenv('GOOGLE_CLOUD_LOCATION')
+
+if not project or not location:
+    raise ValueError("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION must be set in environment")
 
 client = genai.Client(
-    api_key=gemini_api_key,
+    vertexai=True,
+    project=project,
+    location=location,
 )
 
 

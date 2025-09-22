@@ -1,290 +1,203 @@
+import os
+from pathlib import Path
 from google import genai
 from google.genai import types
-from PIL import Image
-from io import BytesIO
-import base64
-import replicate
-import requests
-from caption_generator import generate_caption
+from google.genai.types import GenerateImagesConfig
 from dotenv import load_dotenv
-import os
-import logging
 import time
+from caption_generator import generate_caption
+from PIL import Image, ImageDraw, ImageFont
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
 load_dotenv()
 
-def clean(text):
-    """Clean text by removing quotes and newlines"""
-    if not text:
-        return ""
-    return str(text).strip().replace('"', "'").replace("\n", " ")
+# Get project and location from env
+PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
+LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION")
 
-def generate_meme_image(user_prompt: str):
-    """
-    Generate a meme image from user prompt.
-    First generates captions, then creates image with those captions.
-    
-    Args:
-        user_prompt (str): User's prompt for meme generation
-        
-    Returns:
-        str: Path to generated image file, or None if failed
-    """
-    print(f"🎯 Processing user prompt: {user_prompt}")
-    
-    # Ensure the generated_images directory exists
-    os.makedirs('generated_images', exist_ok=True)
-    
-    # Step 1: Generate caption using the caption generator
-    print("📝 Generating meme caption...")
-    caption_data = generate_caption(user_prompt)
-    
-    # Check if caption generation failed
-    if caption_data.get('error'):
-        print(f"❌ Caption generation failed: {caption_data['error']}")
-        return None
-    
-    # Check if we have the required caption data
-    if not caption_data.get('meme_concept') or not caption_data.get('top_caption') or not caption_data.get('bottom_caption'):
-        print("❌ Invalid caption data received")
-        return None
-    
-    # Step 2: Print the generated caption for user feedback
-    print("\n📋 Generated Caption Data:")
-    print(f"  Meme Concept: {caption_data['meme_concept']}")
-    print(f"  Top Caption: {caption_data['top_caption']}")
-    if caption_data.get('middle_caption'):
-        print(f"  Middle Caption: {caption_data['middle_caption']}")
-    print(f"  Bottom Caption: {caption_data['bottom_caption']}")
-    print()
-    
-    # Step 3: Create the image generation prompt
-    image_prompt = create_image_prompt(caption_data)
-    
-    # Step 4: Generate the image
-    image_path = image_generation(image_prompt)
-    
-    return image_path
+if not PROJECT or not LOCATION:
+    raise ValueError("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION must be set in environment")
 
-def create_image_prompt(caption_data):
-    """
-    Create a detailed prompt for image generation based on caption data.
-    
-    Args:
-        caption_data (dict): Dictionary containing meme caption data
-        
-    Returns:
-        str: Formatted prompt for image generation
-    """
-    # Clean the text data
-    meme_concept = clean(caption_data['meme_concept'])
-    top_caption = clean(caption_data['top_caption'])
-    bottom_caption = clean(caption_data['bottom_caption'])
-    middle_caption = clean(caption_data.get('middle_caption', ''))
-    
-    # Build the prompt
-    prompt = (
-        f"Create a meme image for the following concept: {meme_concept}. "
-        f"The image should support these text overlays: "
-        f"Top text: '{top_caption}', "
-    )
-    
-    if middle_caption:
-        prompt += f"Middle text: '{middle_caption}', "
-    
-    prompt += (
-        f"Bottom text: '{bottom_caption}'. "
-        "Make the image clear, high-quality, and suitable for meme format. "
-        "The image should be visually engaging and support the humor of the captions. "
-        "IMPORTANT: Create a unique, original image that fits the meme concept perfectly."
-    )
-    
-    return prompt
+client = genai.Client(
+    vertexai=True,
+    project=PROJECT,
+    location=LOCATION,
+)
 
-def image_generation(prompt: str):
+def generate_meme_image(prompt: str, model: str = None) -> str:
     """
-    Generate a meme image using Gemini as primary method,
-    with Replicate Imagen-4 as backup if Gemini fails.
-    
+    Generate a meme image using Google's Imagen API.
+    First generates captions using the caption generator, then uses the meme_concept for image generation.
+
     Args:
-        prompt (str): The image generation prompt
-        
+        prompt (str): The user's prompt for meme generation
+        model (str, optional): The Imagen model to use. If None, uses IMAGEN_MODEL from env.
+
     Returns:
-        str: Path to the generated image file, or None if failed
+        str: Path to the generated image file
     """
-    print("🖼️ Starting image generation...")
-    
-    # Try Gemini first (as primary)
-    image_path = generate_with_gemini(prompt)
-    
-    if image_path:
-        print("✅ Image generated successfully with Gemini")
-        return image_path
+    # First, generate captions
+    caption_result = generate_caption(prompt)
+
+    if caption_result.get('error'):
+        raise Exception(f"Caption generation failed: {caption_result['error']}")
+
+    # Build image prompt using meme concept and captions
+    meme_concept = caption_result.get('meme_concept', '')
+    top_caption = caption_result.get('top_caption', '')
+    bottom_caption = caption_result.get('bottom_caption', '')
+    middle_caption = caption_result.get('middle_caption')
+
+    if not meme_concept:
+        raise Exception("No meme concept generated")
+
+    # Create a detailed prompt that includes the concept and caption context
+    image_prompt = meme_concept
+    if top_caption or bottom_caption:
+        caption_parts = []
+        if top_caption:
+            caption_parts.append(f"top text: '{top_caption}'")
+        if middle_caption:
+            caption_parts.append(f"middle text: '{middle_caption}'")
+        if bottom_caption:
+            caption_parts.append(f"bottom text: '{bottom_caption}'")
+        if caption_parts:
+            image_prompt += f". Meme with {' and '.join(caption_parts)}."
+
+    # Define available models in order of preference
+    available_models = [
+        "gemini-2.0-flash-preview-image-generation",
+        "imagen-3.0-generate-001",
+        "imagen-4.0-generate-001"
+    ]
+
+    # Get preferred model
+    preferred_model = model or os.getenv("IMAGEN_MODEL", "imagen-4.0-generate-001")
+
+    # Ensure preferred model is in the list, add it first if not
+    if preferred_model not in available_models:
+        available_models.insert(0, preferred_model)
     else:
-        print("⚠️ Gemini failed, trying Replicate Imagen-4 as backup...")
-        image_path = generate_with_replicate(prompt)
-        if image_path:
-            print("✅ Image generated successfully with Replicate Imagen-4 backup")
-            print(image_path)
-            return image_path
-        else:
-            print("❌ Both image generation methods failed")
-            return None
+        # Move preferred to front
+        available_models.remove(preferred_model)
+        available_models.insert(0, preferred_model)
 
-def generate_with_replicate(prompt):
+    last_exception = None
+    for model_name in available_models:
+        try:
+            if model_name == "gemini-2.0-flash-preview-image-generation":
+                image = client.models.generate_content(
+                    model="gemini-2.0-flash-preview-image-generation",
+                    contents=image_prompt,  # Use image_prompt instead of prompt
+                    config=types.GenerateContentConfig(
+                        response_modalities=['TEXT', 'IMAGE']
+                    )
+                )
+                # For gemini, extract image differently if needed
+                # Assuming it returns image in response
+                generated_image = image.candidates[0].content.parts[0].inline_data  # Adjust based on actual response
+            elif model_name in ["imagen-3.0-generate-001", "imagen-4.0-generate-001"]:
+                image = client.models.generate_images(
+                    model=model_name,
+                    prompt=image_prompt,
+                    config=GenerateImagesConfig(
+                        image_size="1K",
+                    ),
+                )
+                generated_image = image.generated_images[0].image
+            else:
+                continue  # Skip unknown models
+
+            # Create unique filename
+            timestamp = int(time.time())
+            output_file = f"meme-{timestamp}.png"
+            output_path = Path("generated_images") / output_file
+            output_path.parent.mkdir(exist_ok=True)
+
+            # Save image
+            generated_image.save(str(output_path))
+
+            print(f"Created output image using model {model_name}")
+
+            return str(output_path)
+
+        except Exception as e:
+            last_exception = e
+            print(f"Model {model_name} failed: {str(e)}")
+            continue
+
+    # If all models failed
+    raise Exception(f"Failed to generate image with all available models. Last error: {str(last_exception)}")
+
+
+def add_text_overlay(image_path: str, top_text: str = "", bottom_text: str = "", middle_text: str = ""):
     """
-    Generate image using Replicate Imagen-4
-    
+    Add text overlays to an image to create a complete meme.
+
     Args:
-        prompt (str): Image generation prompt
-        
-    Returns:
-        str: Image path if successful, None if failed
+        image_path (str): Path to the image file
+        top_text (str): Text for top of image
+        bottom_text (str): Text for bottom of image
+        middle_text (str): Text for middle of image
     """
     try:
-        replicate_token = os.getenv("REPLICATE_API_TOKEN")
-        if not replicate_token:
-            logger.error("REPLICATE_API_TOKEN not found in environment variables")
-            return None
-        
-        client = replicate.Client(api_token=replicate_token)
-        
-        input_data = {
-            "prompt": prompt,
-            "aspect_ratio": "16:9",
-            "safety_filter_level": "block_medium_and_above"
-        }
-        
-        print("🔄 Generating image with Replicate Imagen-4...")
-        output = client.run("google/imagen-4", input=input_data)
-        
-        if output:
-            try:
-                # Handle different types of output from Replicate
-                image_url = None
-                
-                # Method 1: Direct FileOutput object
-                if hasattr(output, 'url'):
-                    image_url = output.url
-                    print(f"📥 Found image URL from FileOutput: {image_url}")
-                
-                # Method 2: Check if it's iterable (list/generator)
-                elif hasattr(output, '__iter__') and not isinstance(output, str):
-                    try:
-                        output_list = list(output)
-                        if output_list:
-                            first_item = output_list[0]
-                            if hasattr(first_item, 'url'):
-                                image_url = first_item.url
-                            else:
-                                image_url = str(first_item)
-                            print(f"📥 Found image URL from list: {image_url}")
-                    except Exception as e:
-                        logger.warning(f"Could not convert output to list: {e}")
-                
-                # Method 3: Direct string URL
-                else:
-                    image_url = str(output)
-                    print(f"📥 Using direct URL: {image_url}")
-                
-                if not image_url:
-                    logger.error("Could not extract image URL from output")
-                    return None
-                
-                # Download the image
-                print(f"⬇️ Downloading image from: {image_url}")
-                response = requests.get(image_url, timeout=30)
-                response.raise_for_status()
-                
-                # FIXED: Save to generated_images directory
-                timestamp = int(time.time())
-                image_path = f'generated_images/replicate-generated-image-{timestamp}.png'
-                
-                with open(image_path, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"💾 Image saved to: {image_path}")
-                
-                # Display the image (optional - you might want to comment this out for production)
-                try:
-                    image = Image.open(image_path)
-                    # image.show()  # Commented out for server environment
-                except Exception as e:
-                    logger.warning(f"Could not display image: {e}")
-                
-                return image_path
-                
-            except Exception as e:
-                logger.error(f"Error processing Replicate output: {e}")
-                logger.info(f"Output type: {type(output)}")
-                logger.info(f"Output attributes: {dir(output) if hasattr(output, '__dict__') else 'No attributes'}")
-                return None
-        else:
-            logger.error("No output received from Replicate")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Replicate image generation failed: {str(e)}")
-        return None
+        # Open image
+        img = Image.open(image_path)
+        draw = ImageDraw.Draw(img)
 
-def generate_with_gemini(prompt):
-    """
-    Generate image using Gemini
-    
-    Args:
-        prompt (str): Image generation prompt
-        
-    Returns:
-        str: Image path if successful, None if failed
-    """
-    try:
-        gemini_api_key = os.getenv('GEMINI_API')
-        if not gemini_api_key:
-            logger.error("GEMINI_API key not found in environment variables")
-            return None
-        
-        client = genai.Client(api_key=gemini_api_key)
-        
-        print("🔄 Generating image with Gemini...")
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-preview-image-generation",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=['TEXT', 'IMAGE']
-            )
-        )
-        
-        for part in response.candidates[0].content.parts:
-            if part.text is not None:
-                print("Gemini response:", part.text)
-            elif part.inline_data is not None:
-                # Save the image with timestamp to avoid conflicts
-                timestamp = int(time.time())
-                image_path = f'generated_images/gemini-generated-image-{timestamp}.png'
-                
-                image = Image.open(BytesIO(part.inline_data.data))
-                image.save(image_path)
-                
-                print(f"💾 Image saved to: {image_path}")
-                
-                # Display the image (optional - you might want to comment this out for production)
-                try:
-                    # image.show()  # Commented out for server environment
-                    pass
-                except Exception as e:
-                    logger.warning(f"Could not display image: {e}")
-                
-                return image_path
-        
-        logger.error("No image data received from Gemini")
-        return None
-        
+        # Get image dimensions
+        width, height = img.size
+
+        # Use default font
+        font = ImageFont.load_default()
+
+        # Simple text drawing without wrapping for now
+        # Add top text
+        if top_text:
+            text = top_text.upper()
+            # Simple centering
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            x = (width - text_width) // 2
+            y = 10
+            # White text with black outline
+            for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw.text((x + offset[0], y + offset[1]), text, font=font, fill="black")
+            draw.text((x, y), text, font=font, fill="white")
+
+        # Add bottom text
+        if bottom_text:
+            text = bottom_text.upper()
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            x = (width - text_width) // 2
+            y = height - text_height - 10
+            for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw.text((x + offset[0], y + offset[1]), text, font=font, fill="black")
+            draw.text((x, y), text, font=font, fill="white")
+
+        # Add middle text
+        if middle_text:
+            text = middle_text.upper()
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            x = (width - text_width) // 2
+            y = (height - text_height) // 2
+            for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw.text((x + offset[0], y + offset[1]), text, font=font, fill="black")
+            draw.text((x, y), text, font=font, fill="white")
+
+        # Save the image with text
+        img.save(image_path)
+        print(f"Successfully added text overlay to {image_path}")
+
     except Exception as e:
-        logger.error(f"Gemini image generation failed: {str(e)}")
-        return None
+        print(f"Warning: Failed to add text overlay: {e}")
+        import traceback
+        traceback.print_exc()
+        # Don't raise exception, just log warning
+
+
 

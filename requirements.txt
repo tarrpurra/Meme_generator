@@ -20,3 +20,5 @@ Pillow
 # transformers 
 # accelerate
 replicate
+google-cloud-aiplatform
+google-auth
