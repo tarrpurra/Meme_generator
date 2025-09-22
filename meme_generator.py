@@ -54,8 +54,18 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
     if not meme_concept:
         raise Exception("No meme concept generated")
 
-    # Create image prompt using only the concept (without captions)
+    # Create a detailed prompt that includes the concept and caption context
     image_prompt = meme_concept
+    if top_caption or bottom_caption:
+        caption_parts = []
+        if top_caption:
+            caption_parts.append(f"top text: '{top_caption}'")
+        if middle_caption:
+            caption_parts.append(f"middle text: '{middle_caption}'")
+        if bottom_caption:
+            caption_parts.append(f"bottom text: '{bottom_caption}'")
+        if caption_parts:
+            image_prompt += f". Meme with {' and '.join(caption_parts)}."
 
     # Define available models in order of preference
     available_models = [
@@ -82,7 +92,7 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
                     model=model_name,
                     prompt=image_prompt,
                     config=GenerateImagesConfig(
-                        image_size="2K",
+                        image_size="1K",
                     ),
                 )
                 generated_image = image.generated_images[0].image
@@ -104,9 +114,6 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
 
             # Save image
             generated_image.save(str(output_path))
-
-            # Add text overlay
-            add_text_overlay(str(output_path), top_caption, bottom_caption, middle_caption)
 
             print(f"Created output image using model {model_name}")
 
