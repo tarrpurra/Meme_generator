@@ -91,9 +91,6 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
                 image = client.models.generate_images(
                     model=model_name,
                     prompt=image_prompt,
-                    config=GenerateImagesConfig(
-                        image_size="1K",
-                    ),
                 )
                 generated_image = image.generated_images[0].image
             elif model_name == "imagen-3.0-generate-001":
