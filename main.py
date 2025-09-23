@@ -6,8 +6,6 @@ from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, Optional
 from pathlib import Path
 import asyncio, os, time, json, hashlib, logging
-from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
 
 # --- External logic (must return a file path under generated_images/) ---
 from meme_generator import generate_meme_image  # your function
@@ -33,10 +31,8 @@ CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "21600"))  # default 6h
 ICP_MAX_RESPONSE_SIZE = int(float(os.getenv("ICP_MAX_RESPONSE_SIZE_BYTES", str(1.8 * 1024 * 1024))))
 ICP_TIMEOUT = int(os.getenv("ICP_TIMEOUT_SECONDS", "25"))  # keep < 30s
 
-# Auto-cleanup config
-AUTO_CLEANUP_ENABLED = os.getenv("AUTO_CLEANUP_ENABLED", "true").lower() == "true"
-CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
-CLEANUP_OLDER_THAN_HOURS = int(os.getenv("CLEANUP_OLDER_THAN_HOURS", "48"))
+# Manual cleanup defaults
+CLEANUP_OLDER_THAN_HOURS = int(os.getenv("CLEANUP_OLDER_THAN_HOURS", "240"))  # 10 days
 
 # CORS origins (restrict in prod)
 DEFAULT_ORIGINS = [
@@ -46,28 +42,8 @@ DEFAULT_ORIGINS = [
 ]
 ALLOW_ORIGINS = [o for o in os.getenv("ALLOW_ORIGINS", "").split(",") if o.strip()] or DEFAULT_ORIGINS
 
-# ---------------- Lifespan ----------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global cleanup_task, last_cleanup_time
-    if AUTO_CLEANUP_ENABLED:
-        cleanup_task = asyncio.create_task(periodic_cleanup())
-        last_cleanup_time = datetime.now()
-        # delayed initial cleanup
-        async def initial_cleanup():
-            await asyncio.sleep(300)
-            cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
-        asyncio.create_task(initial_cleanup())
-    yield
-    if cleanup_task:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
-
 # ---------------- App ----------------
-app = FastAPI(title=APP_TITLE, version="1.2.0", docs_url="/docs", redoc_url="/redoc", lifespan=lifespan)
+app = FastAPI(title=APP_TITLE, version="1.2.0", docs_url="/docs", redoc_url="/redoc")
 
 app.add_middleware(
     CORSMiddleware,
@@ -132,9 +108,7 @@ def _get_lock(key: str) -> asyncio.Lock:
         _locks[key] = asyncio.Lock()
     return _locks[key]
 
-# ---------------- Cleanup (background) ----------------
-cleanup_task: Optional[asyncio.Task] = None
-last_cleanup_time: Optional[datetime] = None
+# ---------------- Cleanup (manual only) ----------------
 
 def cleanup_old_images_sync(older_than_hours: int = CLEANUP_OLDER_THAN_HOURS) -> Dict[str, Any]:
     try:
@@ -171,17 +145,6 @@ def cleanup_old_images_sync(older_than_hours: int = CLEANUP_OLDER_THAN_HOURS) ->
     except Exception as e:
         return {"success": False, "error": str(e), "timestamp": int(time.time())}
 
-async def periodic_cleanup():
-    global last_cleanup_time
-    logger.info(f"Starting periodic cleanup every {CLEANUP_INTERVAL_HOURS}h")
-    while True:
-        await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
-        result = cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
-        last_cleanup_time = datetime.now()
-        if result.get("success"):
-            logger.info(f"Cleanup: deleted {result.get('deleted_count', 0)} files")
-        else:
-            logger.error(f"Cleanup failed: {result.get('error')}")
 
 # ---------------- Routes ----------------
 @app.get("/health")
@@ -191,12 +154,6 @@ def health():
         "service": "icp-meme-generator",
         "timestamp": int(time.time()),
         "version": "1.2.0",
-        "auto_cleanup": {
-            "enabled": AUTO_CLEANUP_ENABLED,
-            "interval_hours": CLEANUP_INTERVAL_HOURS,
-            "cleanup_older_than_hours": CLEANUP_OLDER_THAN_HOURS,
-            "last_cleanup": last_cleanup_time.isoformat() if last_cleanup_time else None,
-        },
     }
 
 @app.get("/")
@@ -208,9 +165,8 @@ def index():
         "endpoints": {
             "GET/POST /generate_meme": "Generate meme, returns image URL + metadata",
             "GET /list_generated_images": "List stored images",
-            "DELETE /cleanup_old_images?older_than_hours=": "Manual cleanup",
-            "GET /cleanup_status": "Auto-cleanup status",
-            "POST /trigger_cleanup": "Run cleanup now",
+            "DELETE /cleanup_old_images?older_than_hours=": "Manual cleanup (default 10 days)",
+            # "POST /trigger_cleanup": "Run cleanup now",
             "GET /health": "Health probe",
         },
         "usage_examples": {
@@ -340,27 +296,14 @@ async def list_generated_images():
     }
 
 @app.delete("/cleanup_old_images")
-async def cleanup_old_images_manual(older_than_hours: int = 24):
+async def cleanup_old_images_manual(older_than_hours: int = 240):
     return cleanup_old_images_sync(older_than_hours)
 
-@app.get("/cleanup_status")
-async def cleanup_status():
-    return {
-        "auto_cleanup_enabled": AUTO_CLEANUP_ENABLED,
-        "cleanup_interval_hours": CLEANUP_INTERVAL_HOURS,
-        "cleanup_older_than_hours": CLEANUP_OLDER_THAN_HOURS,
-        "last_cleanup_time": last_cleanup_time.isoformat() if last_cleanup_time else None,
-        "next_cleanup_approximate": (
-            (last_cleanup_time + timedelta(hours=CLEANUP_INTERVAL_HOURS)).isoformat()
-            if last_cleanup_time else "Unknown"
-        ),
-        "cleanup_task_running": cleanup_task is not None and not cleanup_task.done(),
-    }
 
-@app.post("/trigger_cleanup")
-async def trigger_cleanup_now():
-    result = cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
-    return {"message": "Manual cleanup completed", "result": result}
+# @app.post("/trigger_cleanup")
+# async def trigger_cleanup_now():
+#     result = cleanup_old_images_sync(CLEANUP_OLDER_THAN_HOURS)
+#     return {"message": "Manual cleanup completed", "result": result}
 
 # ---------------- Error handling ----------------
 @app.exception_handler(Exception)
