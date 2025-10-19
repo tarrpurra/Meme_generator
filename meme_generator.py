@@ -6,6 +6,7 @@ import base64
 import replicate
 import requests
 from caption_generator import generate_caption
+from util import add_watermark, create_default_watermark_configs
 from dotenv import load_dotenv
 import os
 import logging
@@ -68,6 +69,18 @@ def generate_meme_image(user_prompt: str):
     
     # Step 4: Generate the image
     image_path = image_generation(image_prompt)
+    
+    # Step 5: Add watermark if image generation was successful
+    if image_path and os.path.exists(image_path):
+        print("🎨 Adding watermark to generated image...")
+        watermarked_path = apply_watermark_to_meme(image_path)
+        
+        # Use watermarked version if successful, otherwise keep original
+        if watermarked_path and watermarked_path != image_path:
+            print(f"✅ Watermark applied: {watermarked_path}")
+            return watermarked_path
+        else:
+            print("⚠️ Watermarking failed, returning original image")
     
     return image_path
 
@@ -243,12 +256,19 @@ def generate_with_gemini(prompt):
         str: Image path if successful, None if failed
     """
     try:
-        gemini_api_key = os.getenv('GEMINI_API')
-        if not gemini_api_key:
-            logger.error("GEMINI_API key not found in environment variables")
+        # Use Vertex AI with service account authentication
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+        location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
+        
+        if not project_id:
+            logger.error("GOOGLE_CLOUD_PROJECT not found in environment variables")
             return None
         
-        client = genai.Client(api_key=gemini_api_key)
+        client = genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=location
+        )
         
         print("🔄 Generating image with Gemini...")
         response = client.models.generate_content(
@@ -287,4 +307,36 @@ def generate_with_gemini(prompt):
     except Exception as e:
         logger.error(f"Gemini image generation failed: {str(e)}")
         return None
+
+def apply_watermark_to_meme(image_path: str) -> str:
+    """
+    Apply watermark to a generated meme image (logo only).
+    
+    Args:
+        image_path (str): Path to the generated image
+        
+    Returns:
+        str: Path to watermarked image, or original path if watermarking fails
+    """
+    try:
+        # Get default configuration (logo only)
+        configs = create_default_watermark_configs()
+        config = configs["professional_logo_only"]
+        
+        # Apply watermark
+        watermarked_path = add_watermark(image_path, **config)
+        
+        # If watermarking was successful and created a new file, remove the original
+        if watermarked_path != image_path and os.path.exists(watermarked_path):
+            try:
+                os.remove(image_path)  # Remove original unwatermarked image
+                logger.info(f"Original image removed: {image_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove original image: {e}")
+        
+        return watermarked_path
+        
+    except Exception as e:
+        logger.error(f"Error applying watermark: {str(e)}")
+        return image_path  # Return original path if watermarking fails
 

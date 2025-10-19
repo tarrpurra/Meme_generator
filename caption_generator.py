@@ -10,7 +10,9 @@ load_dotenv()
 gemini_api_key = os.getenv('GEMINI_API')
 
 client = genai.Client(
-    api_key=gemini_api_key,
+    vertexai=True,
+    project=project_id,
+    location=location
 )
 
 
