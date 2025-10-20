@@ -2,21 +2,7 @@ fastapi[standard]
 pydantic
 python-dotenv
 uvicorn
-pandas
-numpy
 google-genai==1.26.0
-uvicorn
 Pillow>=10.0.0
-# Optional/future packages
-chromadb
-langchain
 requests
-beautifulsoup4
-loguru
-httpx
-torch 
-torchvision 
-diffusers 
-transformers 
-accelerate
-replicate 
+replicate
