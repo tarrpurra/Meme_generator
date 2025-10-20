@@ -6,7 +6,7 @@ pandas
 numpy
 google-genai==1.26.0
 uvicorn
-Pillow
+Pillow>=10.0.0
 # Optional/future packages
 # chromadb
 # langchain
@@ -19,6 +19,4 @@ Pillow
 # diffusers 
 # transformers 
 # accelerate
-replicate
-google-cloud-aiplatform
-google-auth
+# replicate 

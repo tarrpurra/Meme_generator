@@ -114,6 +114,12 @@ def generate_meme_image(prompt: str, model: str = None) -> str:
 
             print(f"Created output image using model {model_name}")
 
+            try:
+                # Add watermark (bottom-right, translucent)
+                add_watermark(str(output_path))
+            except Exception as wme:
+                print(f"Warning: Failed to add watermark: {wme}")
+
             return str(output_path)
 
         except Exception as e:
@@ -196,4 +202,51 @@ def add_text_overlay(image_path: str, top_text: str = "", bottom_text: str = "",
         # Don't raise exception, just log warning
 
 
+def add_watermark(
+    image_path: str,
+    watermark_path: str = str(Path("watermark_assets") / "mementic_log.png"),
+    opacity: float = 0.5,
+    margin: int = 16,
+    relative_scale: float = 0.18,
+):
+    """
+    Overlay a translucent watermark logo at the bottom-right corner.
 
+    Args:
+        image_path (str): Path to the base image to watermark (modified in place)
+        watermark_path (str): Path to the watermark image (PNG with transparency preferred)
+        opacity (float): 0.0-1.0 opacity multiplier applied to watermark alpha
+        margin (int): Pixel margin from the edges
+        relative_scale (float): Target watermark width as a fraction of base image width
+    """
+    try:
+        base = Image.open(image_path).convert("RGBA")
+        logo = Image.open(watermark_path).convert("RGBA")
+
+        # Scale watermark relative to base width
+        target_w = max(1, int(base.width * relative_scale))
+        scale_ratio = target_w / float(logo.width)
+        target_h = max(1, int(logo.height * scale_ratio))
+        logo = logo.resize((target_w, target_h), Image.LANCZOS)
+
+        # Apply opacity while preserving existing alpha
+        r, g, b, a = logo.split()
+        a = a.point(lambda p: int(p * max(0.0, min(1.0, opacity))))
+        logo = Image.merge("RGBA", (r, g, b, a))
+
+        # Position at bottom-right
+        x = base.width - logo.width - margin
+        y = base.height - logo.height - margin
+        x = max(0, x)
+        y = max(0, y)
+
+        base.alpha_composite(logo, dest=(x, y))
+
+        # Save back, convert to RGB for broader compatibility
+        base.convert("RGB").save(image_path)
+        print(f"Successfully watermarked {image_path}")
+    except Exception as e:
+        print(f"Warning: Failed to add watermark to {image_path}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Don't raise exception, just log warning
